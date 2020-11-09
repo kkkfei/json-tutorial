@@ -90,13 +90,51 @@ static int lept_parse_number(lept_context* c, lept_value* v) {
     return LEPT_PARSE_OK;
 }
 
+static int parse_number(const char c)
+{
+	if (c >= '0' && c <= '9') return c - '0';
+	if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+	return -1;
+}
+
+ 
 static const char* lept_parse_hex4(const char* p, unsigned* u) {
-    /* \TODO */
+	int n1 = parse_number(*p);
+	if (n1 < 0) return 0;
+	int n2 = parse_number(*(p+1));
+	if (n2 < 0) return 0;
+	int n3 = parse_number(*(p + 2));
+	if (n3 < 0) return 0;
+	int n4 = parse_number(*(p + 3));
+	if (n4 < 0) return 0;
+
+	p = p + 4;
+	*u = (n1 << 12) + (n2 << 8) + (n3 << 4) + n4;
+
     return p;
 }
 
 static void lept_encode_utf8(lept_context* c, unsigned u) {
     /* \TODO */
+	if (u < 0x0080) {
+		PUTC(c, u);
+	}
+	else if (u >= 0x0080 && u <= 0x07FF) {
+		PUTC(c, 0x0C | (u >> 6));
+		PUTC(c, 0x80 | (u & 0x3F));
+
+	}
+	else if (u >= 0x0800 && u <= 0xFFFF) {
+		PUTC(c, 0xE0 | ((u >> 12) & 0xFF)); /* 0xE0 = 11100000 */
+		PUTC(c, 0x80 | ((u >> 6) & 0x3F)); /* 0x80 = 10000000 */
+		PUTC(c, 0x80 | (u & 0x3F)); /* 0x3F = 00111111 */
+	}
+	else if (u >= 0x10000 && u <= 0x10FFFF) {
+		PUTC(c, 0xF0 | (u >> 18) );  
+		PUTC(c, 0x80 | ((u >> 12) & 0x3F)); 
+		PUTC(c, 0x80 | ((u >> 6)  & 0x3F)); 
+		PUTC(c, 0x80 | (u  & 0x3F));
+	}
 }
 
 #define STRING_ERROR(ret) do { c->top = head; return ret; } while(0)
@@ -128,7 +166,17 @@ static int lept_parse_string(lept_context* c, lept_value* v) {
                     case 'u':
                         if (!(p = lept_parse_hex4(p, &u)))
                             STRING_ERROR(LEPT_PARSE_INVALID_UNICODE_HEX);
-                        /* \TODO surrogate handling */
+
+						if (u >= 0xD800 && u <= 0xDBFF) {
+							if (*p != '\\' && *(p + 1) != 'u') STRING_ERROR(LEPT_PARSE_INVALID_UNICODE_SURROGATE);
+							p = p + 2;
+							int v;
+							if (lept_parse_hex4(p, &v) == 0)  STRING_ERROR(LEPT_PARSE_INVALID_UNICODE_SURROGATE);
+							if (v < 0xDC00 || v > 0xDFFF) STRING_ERROR(LEPT_PARSE_INVALID_UNICODE_SURROGATE);
+							
+							u = 0x10000 + (u - 0xD800) * 0x400 + (v - 0xDC00);
+						}
+
                         lept_encode_utf8(c, u);
                         break;
                     default:

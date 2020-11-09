@@ -127,58 +127,70 @@ static void lept_encode_utf8(lept_context* c, unsigned u) {
 
 #define STRING_ERROR(ret) do { c->top = head; return ret; } while(0)
 
+static int lept_parse_string_raw(lept_context* c, char **str, size_t* len)
+{
+	size_t head = c->top;
+	unsigned u, u2;
+	const char* p;
+	EXPECT(c, '\"');
+	p = c->json;
+	for (;;) {
+		char ch = *p++;
+		switch (ch) {
+		case '\"':
+			*len = c->top - head;
+			*str = (char*)lept_context_pop(c, *len);
+			c->json = p;
+			return LEPT_PARSE_OK;
+		case '\\':
+			switch (*p++) {
+			case '\"': PUTC(c, '\"'); break;
+			case '\\': PUTC(c, '\\'); break;
+			case '/':  PUTC(c, '/'); break;
+			case 'b':  PUTC(c, '\b'); break;
+			case 'f':  PUTC(c, '\f'); break;
+			case 'n':  PUTC(c, '\n'); break;
+			case 'r':  PUTC(c, '\r'); break;
+			case 't':  PUTC(c, '\t'); break;
+			case 'u':
+				if (!(p = lept_parse_hex4(p, &u)))
+					STRING_ERROR(LEPT_PARSE_INVALID_UNICODE_HEX);
+				if (u >= 0xD800 && u <= 0xDBFF) { /* surrogate pair */
+					if (*p++ != '\\')
+						STRING_ERROR(LEPT_PARSE_INVALID_UNICODE_SURROGATE);
+					if (*p++ != 'u')
+						STRING_ERROR(LEPT_PARSE_INVALID_UNICODE_SURROGATE);
+					if (!(p = lept_parse_hex4(p, &u2)))
+						STRING_ERROR(LEPT_PARSE_INVALID_UNICODE_HEX);
+					if (u2 < 0xDC00 || u2 > 0xDFFF)
+						STRING_ERROR(LEPT_PARSE_INVALID_UNICODE_SURROGATE);
+					u = (((u - 0xD800) << 10) | (u2 - 0xDC00)) + 0x10000;
+				}
+				lept_encode_utf8(c, u);
+				break;
+			default:
+				STRING_ERROR(LEPT_PARSE_INVALID_STRING_ESCAPE);
+			}
+			break;
+		case '\0':
+			STRING_ERROR(LEPT_PARSE_MISS_QUOTATION_MARK);
+		default:
+			if ((unsigned char)ch < 0x20)
+				STRING_ERROR(LEPT_PARSE_INVALID_STRING_CHAR);
+			PUTC(c, ch);
+		}
+	}
+}
+
 static int lept_parse_string(lept_context* c, lept_value* v) {
-    size_t head = c->top, len;
-    unsigned u, u2;
-    const char* p;
-    EXPECT(c, '\"');
-    p = c->json;
-    for (;;) {
-        char ch = *p++;
-        switch (ch) {
-            case '\"':
-                len = c->top - head;
-                lept_set_string(v, (const char*)lept_context_pop(c, len), len);
-                c->json = p;
-                return LEPT_PARSE_OK;
-            case '\\':
-                switch (*p++) {
-                    case '\"': PUTC(c, '\"'); break;
-                    case '\\': PUTC(c, '\\'); break;
-                    case '/':  PUTC(c, '/' ); break;
-                    case 'b':  PUTC(c, '\b'); break;
-                    case 'f':  PUTC(c, '\f'); break;
-                    case 'n':  PUTC(c, '\n'); break;
-                    case 'r':  PUTC(c, '\r'); break;
-                    case 't':  PUTC(c, '\t'); break;
-                    case 'u':
-                        if (!(p = lept_parse_hex4(p, &u)))
-                            STRING_ERROR(LEPT_PARSE_INVALID_UNICODE_HEX);
-                        if (u >= 0xD800 && u <= 0xDBFF) { /* surrogate pair */
-                            if (*p++ != '\\')
-                                STRING_ERROR(LEPT_PARSE_INVALID_UNICODE_SURROGATE);
-                            if (*p++ != 'u')
-                                STRING_ERROR(LEPT_PARSE_INVALID_UNICODE_SURROGATE);
-                            if (!(p = lept_parse_hex4(p, &u2)))
-                                STRING_ERROR(LEPT_PARSE_INVALID_UNICODE_HEX);
-                            if (u2 < 0xDC00 || u2 > 0xDFFF)
-                                STRING_ERROR(LEPT_PARSE_INVALID_UNICODE_SURROGATE);
-                            u = (((u - 0xD800) << 10) | (u2 - 0xDC00)) + 0x10000;
-                        }
-                        lept_encode_utf8(c, u);
-                        break;
-                    default:
-                        STRING_ERROR(LEPT_PARSE_INVALID_STRING_ESCAPE);
-                }
-                break;
-            case '\0':
-                STRING_ERROR(LEPT_PARSE_MISS_QUOTATION_MARK);
-            default:
-                if ((unsigned char)ch < 0x20)
-                    STRING_ERROR(LEPT_PARSE_INVALID_STRING_CHAR);
-                PUTC(c, ch);
-        }
-    }
+	char *str;
+	size_t len;
+	int ret;
+	if ((ret = lept_parse_string_raw(c, &str, &len)) == LEPT_PARSE_OK)
+	{
+		lept_set_string(v, str, len);
+	}
+	return ret;
 }
 
 static int lept_parse_value(lept_context* c, lept_value* v);
@@ -244,7 +256,27 @@ static int lept_parse_object(lept_context* c, lept_value* v) {
     for (;;) {
         lept_init(&m.v);
         /* \todo parse key to m.k, m.klen */
+		char *pstr;
+		size_t strlen;
+
+		if (*c->json != '\"') {
+			ret = LEPT_PARSE_MISS_KEY;
+			break;
+		}
+		if (ret = lept_parse_string_raw(c, &pstr, &strlen) != LEPT_PARSE_OK)
+			break;
+		m.klen = strlen;
+		memcpy(m.k = (char*)malloc(strlen + 1), pstr, strlen);
+		m.k[strlen] = '\0';
+
         /* \todo parse ws colon ws */
+		lept_parse_whitespace(c);
+		if (*c->json != ':') {
+			ret = LEPT_PARSE_MISS_COLON;
+			break;
+		}
+		EXPECT(c, ':');
+		lept_parse_whitespace(c);
         /* parse value */
         if ((ret = lept_parse_value(c, &m.v)) != LEPT_PARSE_OK)
             break;
@@ -252,8 +284,34 @@ static int lept_parse_object(lept_context* c, lept_value* v) {
         size++;
         m.k = NULL; /* ownership is transferred to member on stack */
         /* \todo parse ws [comma | right-curly-brace] ws */
+		lept_parse_whitespace(c);
+		if (*c->json == ',') {
+			EXPECT(c, ',');
+			lept_parse_whitespace(c);
+		}
+		else if (*c->json == '}')
+		{
+			EXPECT(c, '}');
+			v->type = LEPT_OBJECT;
+			v->u.o.size = size;
+			size *= sizeof(lept_member);
+			memcpy(v->u.o.m = malloc(size), lept_context_pop(c, size), size);
+			return LEPT_PARSE_OK;
+		}
+		else {
+			ret = LEPT_PARSE_MISS_COMMA_OR_CURLY_BRACKET;
+			break;
+		}
     }
+	if (m.k != NULL) free(m.k);
     /* \todo Pop and free members on the stack */
+	for (size_t i = 0; i < size; ++i)
+	{
+		lept_member* mem = lept_context_pop(c, sizeof(lept_member));
+		if(mem->k != NULL) free(mem->k);
+		lept_free(&mem->v);
+	}
+
     return ret;
 }
 
@@ -303,7 +361,15 @@ void lept_free(lept_value* v) {
                 lept_free(&v->u.a.e[i]);
             free(v->u.a.e);
             break;
+		case LEPT_OBJECT:
+			for (i = 0; i < v->u.o.size; i++)
+			{
+				free(v->u.o.m[i].k);
+				lept_free(&v->u.o.m[i].v);
+			}
+			free(v->u.o.m);
         default: break;
+		
     }
     v->type = LEPT_NULL;
 }
